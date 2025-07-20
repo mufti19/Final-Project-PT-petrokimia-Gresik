@@ -1,0 +1,238 @@
+import pandas as pd
+
+# URL untuk mengakses Google Sheets dalam format Excel (XLSX)
+spreadsheet_url = 'masukkan link spreadsheet'
+
+# Menggunakan pandas untuk membaca data dari URL
+df = pd.read_excel(spreadsheet_url)
+
+# Tampilkan 5 baris pertama dari data
+df.head(15)
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Ambil 2 kolom target
+y = df[['Alokasi', 'Realisasi']]
+
+# =============================
+# 🔷 1. Hitung Z-Score & tandai outlier per kolom
+# =============================
+for col in y.columns:
+    z_scores = (y[col] - y[col].mean()) / y[col].std()
+    df[f'{col}_Outlier'] = np.where(np.abs(z_scores) > 3, True, False)
+    outlier_count = df[f'{col}_Outlier'].sum()
+    print(f"✅ Jumlah outlier pada {col}: {outlier_count}")
+    print(df[df[f'{col}_Outlier']])
+
+# =============================
+# 🔷 2. Visualisasi: Boxplot per kolom
+# =============================
+plt.figure(figsize=(12,5))
+for i, col in enumerate(y.columns, 1):
+    plt.subplot(1,2,i)
+    sns.boxplot(x=df[col])
+    plt.title(f"Boxplot {col}")
+    plt.grid(axis='x')
+
+plt.tight_layout()
+plt.show()
+print(df['Alokasi'].skew())
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+# =============================
+# 🔷 1. Preprocessing
+# =============================
+bulan_indo_2_english = {
+    'Januari': 'January', 'Februari': 'February', 'Maret': 'March', 'April': 'April', 'Mei': 'May',
+    'Juni': 'June', 'Juli': 'July', 'Agustus': 'August', 'September': 'September', 'Oktober': 'October',
+    'November': 'November', 'Desember': 'December'
+}
+
+df['Bulan'] = df['Bulan'].map(bulan_indo_2_english)
+df['Tanggal'] = pd.to_datetime(df['Bulan'] + ' ' + df['Tahun'].astype(str), format='%B %Y')
+df.set_index('Tanggal', inplace=True)
+
+# =============================
+# 🔷 2a. Data training ARIMAX (2021–Jul 2022)
+# =============================
+df_train_arimax = df.loc[(df.index >= '2021-01-01') & (df.index <= '2022-07-31')]
+y_train_arimax = df_train_arimax['Alokasi']
+exog_train_arimax = df_train_arimax[['Realisasi', 'Pembatasan', 'Jumlah Komoditas']]
+
+# =============================
+# 🔷 2b. Data training SARIMAX (2016–Jul 2022)
+# =============================
+df_train_sarimax = df.loc[(df.index >= '2016-01-01') & (df.index <= '2022-07-31')]
+y_train_sarimax = df_train_sarimax['Alokasi']
+exog_train_sarimax = df_train_sarimax[['Realisasi', 'Pembatasan', 'Jumlah Komoditas']]
+
+# =============================
+# 🔷 3. ARIMAX non-seasonal (Forecast 1)
+# =============================
+model_arimax = SARIMAX(y_train_arimax, exog=exog_train_arimax, order=(0,1,2), seasonal_order=(0,0,0,0))
+fit_arimax = model_arimax.fit()
+
+pred_train_1 = fit_arimax.fittedvalues
+mae_1 = mean_absolute_error(y_train_arimax, pred_train_1)
+mse_1 = mean_squared_error(y_train_arimax, pred_train_1)
+rmse_1 = np.sqrt(mse_1)
+r2_1 = r2_score(y_train_arimax, pred_train_1)
+
+print(f"✅ Evaluasi ARIMAX (2021–Jul 2022)")
+print(f"MAE: {mae_1:.2f} | MSE: {mse_1:.2f} | RMSE: {rmse_1:.2f} | R²: {r2_1:.4f}")
+
+# =============================
+# 🔷 4. Forecast ARIMAX 2026–2027 + Interval
+# =============================
+last_train_date = df_train_arimax.index[-1]
+forecast_start_date = pd.Timestamp('2026-01-01')
+months_gap = (forecast_start_date.year - last_train_date.year) * 12 + (forecast_start_date.month - last_train_date.month)
+
+steps_ahead = months_gap + 24  # sampai 2027-12
+
+future_exog_full = pd.DataFrame({
+    'Realisasi': [df_train_arimax['Realisasi'].mean()] * steps_ahead,
+    'Pembatasan': [1] * steps_ahead,
+    'Jumlah Komoditas': [12] * steps_ahead
+}, index=pd.date_range(start=last_train_date + pd.offsets.MonthBegin(1), periods=steps_ahead, freq='MS'))
+
+forecast_result_1 = fit_arimax.get_forecast(steps=steps_ahead, exog=future_exog_full)
+
+# Titik tengah
+forecast_mean_full = forecast_result_1.predicted_mean
+
+# Interval prediksi 95%
+conf_int_full = forecast_result_1.conf_int(alpha=0.05)
+
+# Ambil hanya periode 2026–2027
+forecast_mean_1 = forecast_mean_full['2026-01-01':'2027-12-01']
+conf_int_1 = conf_int_full.loc['2026-01-01':'2027-12-01']
+
+# Gabungkan ke DataFrame
+forecast_table_1 = pd.DataFrame({
+    'Forecast': forecast_mean_1,
+    'Lower': conf_int_1.iloc[:, 0],
+    'Upper': conf_int_1.iloc[:, 1]
+})
+forecast_table_1['Tahun'] = forecast_table_1.index.year
+
+# Total per tahun (pakai titik tengah)
+total_per_tahun = forecast_table_1.groupby('Tahun')['Forecast'].sum()
+
+print("\n✅ Total per tahun (Forecast 1 ARIMAX):")
+print(total_per_tahun)
+
+# Hitung total per tahun untuk ketiga nilai
+total_per_tahun_with_ci = forecast_table_1.groupby('Tahun')[['Forecast', 'Lower', 'Upper']].sum()
+
+# Tampilkan hasil
+print("\n✅ Total per tahun (Forecast 1 ARIMAX) dengan interval:")
+print(total_per_tahun_with_ci)
+
+print("\n✅ Forecast bulanan 2026–2027 dengan Interval:")
+print(forecast_table_1)
+
+# =============================
+# 🔷 5. Seasonal pattern 2016–2022
+# =============================
+df_long = df[df.index <= '2022-07-31']
+df_long['Bulan'] = df_long.index.month
+
+seasonal_pattern = df_long.groupby('Bulan')['Alokasi'].mean()
+seasonal_pattern = seasonal_pattern / seasonal_pattern.sum()
+
+print("\n✅ Pola seasonal bulanan (proporsi):")
+print(seasonal_pattern)
+
+# =============================
+# 🔷 6. Forecast 2: SARIMAX seasonal (Final)
+# =============================
+forecast_final = []
+
+for year in [2026, 2027]:
+    total_year = total_per_tahun.loc[year]
+    for month in range(1, 13):
+        bulan_index = pd.Timestamp(f"{year}-{month:02d}-01")
+        nilai_bulan = total_year * seasonal_pattern.loc[month]
+        forecast_final.append((bulan_index, nilai_bulan))
+
+forecast_final_df = pd.DataFrame(forecast_final, columns=['Tanggal', 'Forecast']).set_index('Tanggal')
+# =============================
+# 🔷 7. Evaluasi SARIMAX (in-sample 2016–Jul 2022)
+# =============================
+model_sarimax = SARIMAX(y_train_sarimax, exog=exog_train_sarimax, order=(1,1,1), seasonal_order=(0,1,1,12))
+fit_sarimax = model_sarimax.fit()
+
+pred_train_2 = fit_sarimax.fittedvalues
+mae_2 = mean_absolute_error(y_train_sarimax, pred_train_2)
+mse_2 = mean_squared_error(y_train_sarimax, pred_train_2)
+rmse_2 = np.sqrt(mse_2)
+r2_2 = r2_score(y_train_sarimax, pred_train_2)
+
+print(f"\n✅ Evaluasi SARIMAX (2016–Jul 2022)")
+print(f"MAE: {mae_2:.2f} | MSE: {mse_2:.2f} | RMSE: {rmse_2:.2f} | R²: {r2_2:.4f}")
+
+# =============================
+# 🔷 8. Visualisasi
+# =============================
+
+plt.figure(figsize=(14,6))
+
+# Data historis lengkap (2016–Jul 2022)
+plt.plot(df_train_sarimax.index, y_train_sarimax,
+         label='Alokasi Historis SARIMAX (2016–Jul 2022)', color='blue')
+
+# Forecast 2025–2027 (final SARIMAX seasonal)
+plt.plot(forecast_final_df.index, forecast_final_df['Forecast'],
+         label='Forecast Final SARIMAX 2025–2027', color='green')
+
+plt.axvline(pd.Timestamp('2026-01-01'), color='gray', linestyle='--', label='Awal Forecast')
+
+plt.title("Forecast 2026–2027: ARIMAX (2021–2022) + Seasonal SARIMAX (2016–2022)")
+plt.xlabel("Tanggal")
+plt.ylabel("Alokasi")
+plt.legend(loc='upper right')
+plt.grid()
+plt.tight_layout()
+plt.show()
+
+# =============================
+# 🔷 9. Tabel forecast final
+# =============================
+print("\n✅ Forecast bulanan final 2026–2027:")
+print(forecast_final_df)
+
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+import numpy as np
+
+def evaluate_arimax(y_true_arimax, y_pred_arimax):
+    mae = mean_absolute_error(y_true_arimax, y_pred_arimax)
+    mse = mean_squared_error(y_true_arimax, y_pred_arimax)
+    rmse = np.sqrt(mse)
+    r2 = r2_score(y_true_arimax, y_pred_arimax)
+    print(f"\n✅ Evaluasi ARIMAX (2021–Jul 2022)")
+    print(f"MAE: {mae:.2f} | MSE: {mse:.2f} | RMSE: {rmse:.2f} | R²: {r2:.4f}")
+    return {'MAE': mae, 'MSE': mse, 'RMSE': rmse, 'R2': r2}
+
+def evaluate_sarimax(y_true_sarimax, y_pred_sarimax):
+    mae = mean_absolute_error(y_true_sarimax, y_pred_sarimax)
+    mse = mean_squared_error(y_true_sarimax, y_pred_sarimax)
+    rmse = np.sqrt(mse)
+    r2 = r2_score(y_true_sarimax, y_pred_sarimax)
+    print(f"\n✅ Evaluasi SARIMAX (2016–Jul 2022)")
+    print(f"MAE: {mae:.2f} | MSE: {mse:.2f} | RMSE: {rmse:.2f} | R²: {r2:.4f}")
+    return {'MAE': mae, 'MSE': mse, 'RMSE': rmse, 'R2': r2}
+
+pred_train_1 = fit_arimax.fittedvalues
+pred_train_2 = fit_sarimax.fittedvalues
+
+metrics_arimax = evaluate_arimax(y_train_arimax, pred_train_1)
+metrics_sarimax = evaluate_sarimax(y_train_sarimax, pred_train_2)
